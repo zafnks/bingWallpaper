@@ -1,0 +1,21 @@
+# Maven
+target/
+.mvn/apache-maven-3.9.6/
+.mvn/apache-maven-3.9.6-bin.zip
+dependency-reduced-pom.xml
+
+# IDE
+.idea/
+
+# Build artifact
+bing-wallpaper.jar
+
+# Claude Code local settings
+.claude/
+AGENTS.md
+
+# CodeGraph index
+.codegraph/
+
+# Maven wrapper
+.mvn/wrapper/maven-wrapper.jar
