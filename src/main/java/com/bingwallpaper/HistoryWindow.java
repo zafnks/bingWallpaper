@@ -290,29 +290,25 @@ public class HistoryWindow extends JFrame {
 
     // ── Loading spinner ───────────────────────────────────────────────
 
-    /** Animated spinning arc shown while thumbnails load. */
+    /** Animated spinning arc with elapsed-time-based angle (no drift / jitter). */
     private static class LoadingSpinner extends JPanel {
         private static final int SIZE = 56;
+        private static final double FULL_TURN_SEC = 1.0;
         private static final Color ARC_COLOR = new Color(0, 120, 215);
         private static final BasicStroke STROKE = new BasicStroke(4.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);
 
         private final Timer timer;
-        private double angle;
-        private BufferedImage frame;
+        private long startNanos;
 
         LoadingSpinner() {
             setPreferredSize(new Dimension(220, 160));
             setOpaque(false);
-            angle = 0;
-            timer = new Timer(16, e -> {
-                angle = (angle + Math.PI / 30) % (2 * Math.PI);
-                repaint();
-            });
+            startNanos = 0;
+            timer = new Timer(16, e -> repaint());
         }
 
         void start() {
-            angle = 0;
-            frame = null;
+            startNanos = System.nanoTime();
             timer.start();
         }
 
@@ -320,20 +316,15 @@ public class HistoryWindow extends JFrame {
 
         @Override
         protected void paintComponent(Graphics g) {
-            int w = getWidth();
-            int h = getHeight();
+            super.paintComponent(g);
+            int w = getWidth(), h = getHeight();
             if (w <= 0 || h <= 0) return;
 
-            // Reuse a pre-rendered frame to avoid double-buffer jitter
-            if (frame == null || frame.getWidth() != w || frame.getHeight() != h) {
-                frame = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
-            }
+            // Angle derived from continuous elapsed time — immune to timer drift
+            double elapsed = (System.nanoTime() - startNanos) / 1_000_000_000.0;
+            double angle = (elapsed / FULL_TURN_SEC * 2.0 * Math.PI) % (2.0 * Math.PI);
 
-            Graphics2D g2 = frame.createGraphics();
-            g2.setComposite(AlphaComposite.Clear);
-            g2.fillRect(0, 0, w, h);
-            g2.setComposite(AlphaComposite.SrcOver);
-
+            Graphics2D g2 = (Graphics2D) g.create();
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             g2.setStroke(STROKE);
             g2.setColor(ARC_COLOR);
@@ -342,17 +333,13 @@ public class HistoryWindow extends JFrame {
             int y = (h - SIZE) / 2 - 14;
             g2.draw(new Arc2D.Double(x, y, SIZE, SIZE, Math.toDegrees(angle), 300, Arc2D.OPEN));
 
-            // "加载中..." label
             g2.setFont(new Font("Microsoft YaHei", Font.PLAIN, 13));
             g2.setColor(Color.GRAY);
             FontMetrics fm = g2.getFontMetrics();
             String loadingText = "加载中...";
-            int tw = fm.stringWidth(loadingText);
-            g2.drawString(loadingText, (w - tw) / 2, y + SIZE + 28);
+            g2.drawString(loadingText, (w - fm.stringWidth(loadingText)) / 2, y + SIZE + 28);
 
             g2.dispose();
-
-            g.drawImage(frame, 0, 0, null);
         }
     }
 }
