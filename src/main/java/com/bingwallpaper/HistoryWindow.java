@@ -8,8 +8,10 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.geom.Arc2D;
 import java.awt.image.BufferedImage;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.function.Consumer;
@@ -17,10 +19,11 @@ import java.util.logging.Logger;
 
 /**
  * Window displaying all downloaded wallpapers as thumbnails.
- * Click a thumbnail to select it, then click "切换" to apply.
+ * Thumbnails load asynchronously; a spinning indicator is shown while loading.
  */
 public class HistoryWindow extends JFrame {
     private static final Logger LOG = Logger.getLogger(HistoryWindow.class.getName());
+    private static final int THUMB_WIDTH = 200;
 
     private List<String> paths;
     private final Consumer<Integer> onSelect;
@@ -28,6 +31,16 @@ public class HistoryWindow extends JFrame {
     private int currentIndex;
     private JButton switchBtn;
     private JPanel grid;
+    private JScrollPane scroll;
+    private LoadingSpinner spinner;
+    private SwingWorker<List<CardData>, Void> loader;
+
+    /** Card built on the worker thread, for final assembly on the EDT. */
+    private static class CardData {
+        final int pathIndex;
+        final JPanel card;
+        CardData(int pathIndex, JPanel card) { this.pathIndex = pathIndex; this.card = card; }
+    }
 
     public HistoryWindow(List<String> paths, int currentIndex, Consumer<Integer> onSelect) {
         super("历史壁纸");
@@ -39,10 +52,9 @@ public class HistoryWindow extends JFrame {
         setSize(1100, 600);
         setLocationRelativeTo(null);
         setIconImage(TrayManager.createTrayIconImage());
-
         setLayout(new BorderLayout());
 
-        // ── Top: switch button + hint ──
+        // ── Top bar ──
         JPanel topBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 6));
         switchBtn = new JButton("切换");
         switchBtn.setFont(new Font("Microsoft YaHei", Font.BOLD, 13));
@@ -50,9 +62,8 @@ public class HistoryWindow extends JFrame {
         switchBtn.addActionListener(e -> {
             if (selectedIndex >= 0) {
                 onSelect.accept(selectedIndex);
-                // Update window to show the new current wallpaper
                 HistoryWindow.this.currentIndex = selectedIndex;
-                rebuildGrid();
+                highlightCurrent();
             }
         });
         topBar.add(switchBtn);
@@ -63,100 +74,169 @@ public class HistoryWindow extends JFrame {
         topBar.add(hint);
         add(topBar, BorderLayout.NORTH);
 
-        // ── Thumbnail grid ──
+        // ── Grid area ──
         grid = new JPanel(new GridLayout(0, 5, 10, 10));
         grid.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-        rebuildGrid();
-        JScrollPane scroll = new JScrollPane(grid);
+
+        spinner = new LoadingSpinner();
+        grid.add(spinner);
+
+        scroll = new JScrollPane(grid);
         scroll.getVerticalScrollBar().setUnitIncrement(16);
         add(scroll, BorderLayout.CENTER);
+
+        // Start async load
+        startLoading();
     }
 
-    /** Called when the window is still showing but history has changed. */
+    /** Called when the window is already open but history has changed. */
     public void refresh(List<String> newPaths, int newCurrentIndex) {
         this.paths = newPaths;
         this.currentIndex = newCurrentIndex;
         this.selectedIndex = -1;
         switchBtn.setEnabled(false);
+        cancelLoader();
         grid.removeAll();
-        rebuildGrid();
+        grid.add(spinner);
+        spinner.start();
         grid.revalidate();
         grid.repaint();
+        startLoading();
     }
 
-    /** Rebuild the thumbnail grid for the current paths and currentIndex. */
-    private void rebuildGrid() {
-        grid.removeAll();
-        for (int i = paths.size() - 1; i >= 0; i--) {
-            int idx = i;
-            File file = new File(paths.get(i));
-            if (!file.exists()) continue;
+    private void cancelLoader() {
+        if (loader != null && !loader.isDone()) {
+            loader.cancel(true);
+        }
+    }
 
-            JPanel card = new JPanel(new BorderLayout(0, 4));
-            boolean isCurrent = (i == currentIndex);
-            card.setBorder(BorderFactory.createLineBorder(
-                    isCurrent ? new Color(0, 120, 215) : Color.LIGHT_GRAY,
-                    isCurrent ? 3 : 2
-            ));
-            card.setPreferredSize(new Dimension(200, 130));
+    private void startLoading() {
+        cancelLoader();
+        spinner.start();
 
-            // Thumbnail
-            JLabel thumb = createThumbnail(file);
-            thumb.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            thumb.addMouseListener(new MouseAdapter() {
-                @Override
-                public void mouseClicked(MouseEvent e) {
-                    selectCard(idx);
+        final List<String> snapshot = new ArrayList<>(paths);
+        final int currentAtStart = currentIndex;
+
+        loader = new SwingWorker<List<CardData>, Void>() {
+            @Override
+            protected List<CardData> doInBackground() {
+                List<CardData> cards = new ArrayList<>();
+                for (int i = snapshot.size() - 1; i >= 0; i--) {
+                    if (isCancelled()) return cards;
+                    File file = new File(snapshot.get(i));
+                    if (!file.exists()) continue;
+
+                    JLabel thumb = createThumbnail(file);
+                    thumb.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+                    final int idx = i;
+                    thumb.addMouseListener(new MouseAdapter() {
+                        @Override
+                        public void mouseClicked(MouseEvent e) {
+                            selectCard(idx);
+                        }
+                    });
+
+                    JPanel card = new JPanel(new BorderLayout(0, 4));
+                    card.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY, 2));
+                    card.setPreferredSize(new Dimension(200, 130));
+                    card.add(thumb, BorderLayout.CENTER);
+
+                    String date = file.getName()
+                            .replaceAll("bing_wallpaper_|\\.jpg", "")
+                            .replace("_", " ");
+                    JLabel dateLabel = new JLabel(date, SwingConstants.CENTER);
+                    dateLabel.setFont(new Font("Microsoft YaHei", Font.PLAIN, 11));
+                    dateLabel.setForeground(Color.GRAY);
+                    card.add(dateLabel, BorderLayout.SOUTH);
+
+                    cards.add(new CardData(i, card));
                 }
-            });
-            card.add(thumb, BorderLayout.CENTER);
-
-            // Date label
-            String date = file.getName()
-                    .replaceAll("bing_wallpaper_|\\.jpg", "")
-                    .replace("_", " ");
-            JLabel dateLabel = new JLabel(date, SwingConstants.CENTER);
-            dateLabel.setFont(new Font("Microsoft YaHei", Font.PLAIN, 11));
-            dateLabel.setForeground(Color.GRAY);
-            card.add(dateLabel, BorderLayout.SOUTH);
-
-            grid.add(card);
-        }
-
-        // If current index points to a valid entry, pre-select it
-        if (currentIndex >= 0 && currentIndex < paths.size()) {
-            File f = new File(paths.get(currentIndex));
-            if (f.exists()) {
-                selectCard(currentIndex);
+                return cards;
             }
-        }
+
+            @Override
+            protected void done() {
+                spinner.stop();
+                grid.removeAll();
+
+                List<CardData> cards;
+                try {
+                    cards = get();
+                } catch (Exception e) {
+                    LOG.warning("Thumbnail loading failed: " + e.getMessage());
+                    grid.add(new JLabel("加载失败", SwingConstants.CENTER));
+                    grid.revalidate();
+                    grid.repaint();
+                    return;
+                }
+
+                for (CardData cd : cards) {
+                    boolean isCurrent = (cd.pathIndex == currentAtStart);
+                    if (isCurrent) {
+                        cd.card.setBorder(BorderFactory.createLineBorder(new Color(0, 120, 215), 3));
+                    }
+                    grid.add(cd.card);
+                }
+
+                // Pre-select current
+                if (currentAtStart >= 0 && currentAtStart < snapshot.size()) {
+                    File f = new File(snapshot.get(currentAtStart));
+                    if (f.exists()) {
+                        selectCardInternal(currentAtStart, snapshot);
+                    }
+                }
+
+                grid.revalidate();
+                grid.repaint();
+                loader = null;
+            }
+        };
+        loader.execute();
     }
 
-    /** Highlight the card at the given history index and enable the switch button. */
-    private void selectCard(int idx) {
-        selectedIndex = idx;
-        // Reset all borders, then highlight selected
+    private void highlightCurrent() {
         for (Component c : grid.getComponents()) {
             if (c instanceof JPanel) {
                 ((JPanel) c).setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY, 2));
             }
         }
+        // The currentIndex was already updated; find the card at that slot
         int slot = 0;
-        for (int i = paths.size() - 1; i >= 0 && slot < grid.getComponentCount(); i--) {
+        for (int i = paths.size() - 1; i >= 0; i--) {
             if (!new File(paths.get(i)).exists()) continue;
-            if (i == idx) {
-                Component card = grid.getComponent(slot);
-                if (card instanceof JPanel) {
-                    ((JPanel) card).setBorder(BorderFactory.createLineBorder(new Color(0, 120, 215), 3));
+            if (i == currentIndex && slot < grid.getComponentCount()) {
+                Component c = grid.getComponent(slot);
+                if (c instanceof JPanel) {
+                    ((JPanel) c).setBorder(BorderFactory.createLineBorder(new Color(0, 120, 215), 3));
                 }
                 break;
             }
             slot++;
         }
+    }
+
+    /** Highlight a card by path index (called from mouse listener). */
+    private void selectCard(int idx) {
+        selectCardInternal(idx, paths);
         switchBtn.setEnabled(true);
     }
 
-    private static final int THUMB_WIDTH = 200;
+    private void selectCardInternal(int idx, List<String> pathList) {
+        selectedIndex = idx;
+        int slot = 0;
+        for (int i = pathList.size() - 1; i >= 0 && slot < grid.getComponentCount(); i--) {
+            if (!new File(pathList.get(i)).exists()) continue;
+            Component c = grid.getComponent(slot);
+            if (c instanceof JPanel) {
+                ((JPanel) c).setBorder(i == idx
+                        ? BorderFactory.createLineBorder(new Color(0, 120, 215), 3)
+                        : BorderFactory.createLineBorder(Color.LIGHT_GRAY, 2));
+            }
+            slot++;
+        }
+    }
+
+    // ── Thumbnail loading ─────────────────────────────────────────────
 
     /** Load a JPEG at reduced resolution and return a 200px-wide thumbnail label. */
     private static JLabel createThumbnail(File file) {
@@ -203,6 +283,51 @@ public class HistoryWindow extends JFrame {
         } finally {
             reader.dispose();
             iis.close();
+        }
+    }
+
+    // ── Loading spinner ───────────────────────────────────────────────
+
+    /** Animated spinning arc shown while thumbnails load. */
+    private static class LoadingSpinner extends JPanel {
+        private final Timer timer;
+        private double angle;
+
+        LoadingSpinner() {
+            setPreferredSize(new Dimension(200, 200));
+            angle = 0;
+            timer = new Timer(30, e -> {
+                angle = (angle + Math.PI / 15) % (2 * Math.PI);
+                repaint();
+            });
+        }
+
+        void start() { angle = 0; timer.start(); }
+        void stop() { timer.stop(); }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+            int size = 48;
+            int x = (getWidth() - size) / 2;
+            int y = (getHeight() - size) / 2 - 20;
+
+            g2.setStroke(new BasicStroke(4f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            g2.setColor(new Color(0, 120, 215));
+            g2.draw(new Arc2D.Double(x, y, size, size, Math.toDegrees(angle), 300, Arc2D.OPEN));
+
+            // "加载中..." text
+            g2.setFont(new Font("Microsoft YaHei", Font.PLAIN, 13));
+            g2.setColor(Color.GRAY);
+            FontMetrics fm = g2.getFontMetrics();
+            String loadingText = "加载中...";
+            int tw = fm.stringWidth(loadingText);
+            g2.drawString(loadingText, (getWidth() - tw) / 2, y + size + 24);
+
+            g2.dispose();
         }
     }
 }
