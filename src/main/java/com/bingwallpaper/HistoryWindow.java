@@ -79,10 +79,10 @@ public class HistoryWindow extends JFrame {
         grid.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
         spinner = new LoadingSpinner();
-        grid.add(spinner);
 
-        scroll = new JScrollPane(grid);
+        scroll = new JScrollPane();
         scroll.getVerticalScrollBar().setUnitIncrement(16);
+        scroll.setViewportView(wrapCentered(spinner));
         add(scroll, BorderLayout.CENTER);
 
         // Start async load
@@ -96,12 +96,16 @@ public class HistoryWindow extends JFrame {
         this.selectedIndex = -1;
         switchBtn.setEnabled(false);
         cancelLoader();
-        grid.removeAll();
-        grid.add(spinner);
+        scroll.setViewportView(wrapCentered(spinner));
         spinner.start();
-        grid.revalidate();
-        grid.repaint();
         startLoading();
+    }
+
+    /** Center a component inside a panel that fills the scroll-pane viewport. */
+    private static JPanel wrapCentered(JComponent child) {
+        JPanel wrapper = new JPanel(new GridBagLayout());
+        wrapper.add(child);
+        return wrapper;
     }
 
     private void cancelLoader() {
@@ -165,8 +169,7 @@ public class HistoryWindow extends JFrame {
                 } catch (Exception e) {
                     LOG.warning("Thumbnail loading failed: " + e.getMessage());
                     grid.add(new JLabel("加载失败", SwingConstants.CENTER));
-                    grid.revalidate();
-                    grid.repaint();
+                    scroll.setViewportView(grid);
                     return;
                 }
 
@@ -186,8 +189,7 @@ public class HistoryWindow extends JFrame {
                     }
                 }
 
-                grid.revalidate();
-                grid.repaint();
+                scroll.setViewportView(grid);
                 loader = null;
             }
         };
@@ -290,44 +292,67 @@ public class HistoryWindow extends JFrame {
 
     /** Animated spinning arc shown while thumbnails load. */
     private static class LoadingSpinner extends JPanel {
+        private static final int SIZE = 56;
+        private static final Color ARC_COLOR = new Color(0, 120, 215);
+        private static final BasicStroke STROKE = new BasicStroke(4.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND);
+
         private final Timer timer;
         private double angle;
+        private BufferedImage frame;
 
         LoadingSpinner() {
-            setPreferredSize(new Dimension(200, 200));
+            setPreferredSize(new Dimension(220, 160));
+            setOpaque(false);
             angle = 0;
-            timer = new Timer(30, e -> {
-                angle = (angle + Math.PI / 15) % (2 * Math.PI);
+            timer = new Timer(16, e -> {
+                angle = (angle + Math.PI / 30) % (2 * Math.PI);
                 repaint();
             });
         }
 
-        void start() { angle = 0; timer.start(); }
+        void start() {
+            angle = 0;
+            frame = null;
+            timer.start();
+        }
+
         void stop() { timer.stop(); }
 
         @Override
         protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            Graphics2D g2 = (Graphics2D) g.create();
+            int w = getWidth();
+            int h = getHeight();
+            if (w <= 0 || h <= 0) return;
+
+            // Reuse a pre-rendered frame to avoid double-buffer jitter
+            if (frame == null || frame.getWidth() != w || frame.getHeight() != h) {
+                frame = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+            }
+
+            Graphics2D g2 = frame.createGraphics();
+            g2.setComposite(AlphaComposite.Clear);
+            g2.fillRect(0, 0, w, h);
+            g2.setComposite(AlphaComposite.SrcOver);
+
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setStroke(STROKE);
+            g2.setColor(ARC_COLOR);
 
-            int size = 48;
-            int x = (getWidth() - size) / 2;
-            int y = (getHeight() - size) / 2 - 20;
+            int x = (w - SIZE) / 2;
+            int y = (h - SIZE) / 2 - 14;
+            g2.draw(new Arc2D.Double(x, y, SIZE, SIZE, Math.toDegrees(angle), 300, Arc2D.OPEN));
 
-            g2.setStroke(new BasicStroke(4f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-            g2.setColor(new Color(0, 120, 215));
-            g2.draw(new Arc2D.Double(x, y, size, size, Math.toDegrees(angle), 300, Arc2D.OPEN));
-
-            // "加载中..." text
+            // "加载中..." label
             g2.setFont(new Font("Microsoft YaHei", Font.PLAIN, 13));
             g2.setColor(Color.GRAY);
             FontMetrics fm = g2.getFontMetrics();
             String loadingText = "加载中...";
             int tw = fm.stringWidth(loadingText);
-            g2.drawString(loadingText, (getWidth() - tw) / 2, y + size + 24);
+            g2.drawString(loadingText, (w - tw) / 2, y + SIZE + 28);
 
             g2.dispose();
+
+            g.drawImage(frame, 0, 0, null);
         }
     }
 }
