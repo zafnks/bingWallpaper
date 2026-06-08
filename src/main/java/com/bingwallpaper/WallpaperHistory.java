@@ -5,6 +5,7 @@ import com.google.gson.GsonBuilder;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -126,7 +127,7 @@ public class WallpaperHistory {
         }
     }
 
-    /** Load history from disk, repairing on first load. */
+    /** Load history from disk, auto-rebuilding from wallpapers folder on any failure. */
     private void load() {
         if (Files.exists(HISTORY_FILE)) {
             try {
@@ -136,13 +137,45 @@ public class WallpaperHistory {
                 if (data != null && data.history != null) {
                     history = new ArrayList<>(data.history);
                     currentIndex = data.currentIndex;
-                    // Dedup and remove missing files, tracking index shift
                     repair();
+                    return;
                 }
-            } catch (IOException e) {
-                LOG.warning("Failed to load history: " + e.getMessage());
+            } catch (Exception e) {
+                LOG.warning("Failed to load history, rebuilding: " + e.getMessage());
             }
         }
+        // File missing, corrupted, or parse failed — rebuild from wallpapers
+        rebuildFromFiles();
+    }
+
+    /** Scan the wallpapers directory and rebuild history from existing files. */
+    private void rebuildFromFiles() {
+        LOG.info("Rebuilding history from wallpaper files...");
+        history.clear();
+        currentIndex = -1;
+        try {
+            if (Files.exists(WALLPAPER_DIR)) {
+                List<Path> files = new ArrayList<>();
+                try (DirectoryStream<Path> ds = Files.newDirectoryStream(WALLPAPER_DIR, "bing_wallpaper_*.jpg")) {
+                    for (Path p : ds) {
+                        files.add(p);
+                    }
+                }
+                java.util.Collections.sort(files);
+                for (Path p : files) {
+                    history.add(p.toAbsolutePath().normalize().toString());
+                }
+                if (!history.isEmpty()) {
+                    currentIndex = history.size() - 1;
+                }
+                LOG.info("Rebuilt history with " + history.size() + " entries");
+            } else {
+                LOG.info("No wallpapers directory — creating empty history");
+            }
+        } catch (IOException e) {
+            LOG.warning("Failed to list wallpapers directory: " + e.getMessage());
+        }
+        save();
     }
 
     /**

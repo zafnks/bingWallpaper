@@ -24,11 +24,15 @@ import java.util.logging.Logger;
 public class HistoryWindow extends JFrame {
     private static final Logger LOG = Logger.getLogger(HistoryWindow.class.getName());
     private static final int THUMB_WIDTH = 200;
+    private static final int BATCH_SIZE = 35; // 5 cols × 7 rows initially visible
 
     private List<String> paths;
     private final Consumer<Integer> onSelect;
     private int selectedIndex = -1;
     private int currentIndex;
+    private int nextLoadIndex;
+    private int currentAtStart;
+    private volatile boolean loadingBatch;
     private JButton switchBtn;
     private JPanel grid;
     private JScrollPane scroll;
@@ -82,10 +86,15 @@ public class HistoryWindow extends JFrame {
 
         scroll = new JScrollPane();
         scroll.getVerticalScrollBar().setUnitIncrement(16);
+        scroll.getVerticalScrollBar().addAdjustmentListener(e -> {
+            if (!e.getValueIsAdjusting()) {
+                checkLoadMore();
+            }
+        });
         scroll.setViewportView(wrapCentered(spinner));
         add(scroll, BorderLayout.CENTER);
 
-        // Start async load
+        // Start async load (first batch)
         startLoading();
     }
 
@@ -112,20 +121,48 @@ public class HistoryWindow extends JFrame {
         if (loader != null && !loader.isDone()) {
             loader.cancel(true);
         }
+        loadingBatch = false;
     }
 
     private void startLoading() {
         cancelLoader();
         spinner.start();
+        grid.removeAll();
+        scroll.setViewportView(wrapCentered(spinner));
+
+        currentAtStart = currentIndex;
+        nextLoadIndex = paths.size() - 1;
+        loadingBatch = false;
+
+        loadNextBatch();
+    }
+
+    /** Triggered by scroll bar; loads more when near the bottom. */
+    private void checkLoadMore() {
+        if (loadingBatch || nextLoadIndex < 0) return;
+        JScrollBar bar = scroll.getVerticalScrollBar();
+        if (bar.getValue() + bar.getVisibleAmount() >= bar.getMaximum() - 100) {
+            loadNextBatch();
+        }
+    }
+
+    /** Load the next batch of thumbnails in the background. */
+    private void loadNextBatch() {
+        if (loadingBatch || nextLoadIndex < 0) return;
+        loadingBatch = true;
+
+        final int start = nextLoadIndex;
+        final int end = Math.max(-1, start - BATCH_SIZE);
+        nextLoadIndex = end;
 
         final List<String> snapshot = new ArrayList<>(paths);
-        final int currentAtStart = currentIndex;
+        final int curIdx = currentAtStart;
 
         loader = new SwingWorker<List<CardData>, Void>() {
             @Override
             protected List<CardData> doInBackground() {
                 List<CardData> cards = new ArrayList<>();
-                for (int i = snapshot.size() - 1; i >= 0; i--) {
+                for (int i = start; i > end && i >= 0; i--) {
                     if (isCancelled()) return cards;
                     File file = new File(snapshot.get(i));
                     if (!file.exists()) continue;
@@ -160,37 +197,49 @@ public class HistoryWindow extends JFrame {
 
             @Override
             protected void done() {
-                spinner.stop();
-                grid.removeAll();
-
+                loadingBatch = false;
                 List<CardData> cards;
                 try {
                     cards = get();
                 } catch (Exception e) {
                     LOG.warning("Thumbnail loading failed: " + e.getMessage());
-                    grid.add(new JLabel("加载失败", SwingConstants.CENTER));
-                    scroll.setViewportView(grid);
+                    if (grid.getComponentCount() == 0) {
+                        grid.add(new JLabel("加载失败", SwingConstants.CENTER));
+                        scroll.setViewportView(grid);
+                    }
+                    loader = null;
                     return;
                 }
 
+                boolean isFirstBatch = (scroll.getViewport().getView() != grid);
+
                 for (CardData cd : cards) {
-                    boolean isCurrent = (cd.pathIndex == currentAtStart);
-                    if (isCurrent) {
+                    if (cd.pathIndex == curIdx) {
                         cd.card.setBorder(BorderFactory.createLineBorder(new Color(0, 120, 215), 3));
+                        selectedIndex = curIdx;
                     }
                     grid.add(cd.card);
                 }
 
-                // Pre-select current
-                if (currentAtStart >= 0 && currentAtStart < snapshot.size()) {
-                    File f = new File(snapshot.get(currentAtStart));
-                    if (f.exists()) {
-                        selectCardInternal(currentAtStart, snapshot);
+                if (isFirstBatch) {
+                    // Pre-select current wallpaper if in this batch
+                    if (curIdx >= 0 && curIdx < snapshot.size()) {
+                        File f = new File(snapshot.get(curIdx));
+                        if (f.exists()) {
+                            selectCardInternal(curIdx, snapshot);
+                        }
                     }
+                    scroll.setViewportView(grid);
                 }
 
-                scroll.setViewportView(grid);
+                grid.revalidate();
+                grid.repaint();
                 loader = null;
+
+                // If grid still doesn't fill the viewport, load next batch immediately
+                if (nextLoadIndex >= 0) {
+                    SwingUtilities.invokeLater(() -> checkLoadMore());
+                }
             }
         };
         loader.execute();

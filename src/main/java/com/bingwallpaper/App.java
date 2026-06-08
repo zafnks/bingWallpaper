@@ -7,6 +7,7 @@ public class App {
 
     /** OS check, then wire up WallpaperService and TrayManager on the EDT. */
     public static void main(String[] args) {
+        LogConfig.init();
         if (!System.getProperty("os.name").toLowerCase().contains("win")) {
             System.err.println("This application only supports Windows.");
             System.exit(1);
